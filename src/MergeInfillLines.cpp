@@ -11,13 +11,18 @@ void MergeInfillLines::writeCompensatedMove(Point& to, double speed, GCodePath& 
 {
     double old_line_width = INT2MM(last_path.config->getLineWidth());
     double new_line_width_mm = INT2MM(new_line_width);
-    double speed_mod = old_line_width / new_line_width_mm;
     double extrusion_mod = new_line_width_mm / old_line_width;
-    double new_speed = std::min(speed * speed_mod, 150.0); // TODO: hardcoded value: max extrusion speed is 150 mm/s = 9000 mm/min
+    double new_speed = speed;
+    if (speed_equalize_flow_enabled)
+    {
+        double speed_mod = old_line_width / new_line_width_mm;
+        new_speed = std::min(speed * speed_mod, speed_equalize_flow_max);
+    }
+    sendLineTo(last_path.config->type, to, last_path.getLineWidth());
     gcode.writeMove(to, new_speed, last_path.getExtrusionMM3perMM() * extrusion_mod);
 }
     
-bool MergeInfillLines::mergeInfillLines(double speed, unsigned int& path_idx)
+bool MergeInfillLines::mergeInfillLines(unsigned int& path_idx)
 { //Check for lots of small moves and combine them into one large line
     Point prev_middle;
     Point last_middle;
@@ -30,12 +35,12 @@ bool MergeInfillLines::mergeInfillLines(double speed, unsigned int& path_idx)
             GCodePath& move_path = paths[path_idx];
             for(unsigned int point_idx = 0; point_idx < move_path.points.size() - 1; point_idx++)
             {
-                gcode.writeMove(move_path.points[point_idx], speed, move_path.getExtrusionMM3perMM());
+                gcode.writeMove(move_path.points[point_idx], move_path.config->getSpeed() * extruder_plan.getTravelSpeedFactor(), move_path.getExtrusionMM3perMM());
             }
             gcode.writeMove(prev_middle, travelConfig.getSpeed(), 0);
             GCodePath& last_path = paths[path_idx + 3];
             
-            writeCompensatedMove(last_middle, speed, last_path, line_width);
+            writeCompensatedMove(last_middle, last_path.config->getSpeed() * extruder_plan.getExtrudeSpeedFactor(), last_path, line_width);
         }
         
         path_idx += 2;
@@ -44,7 +49,7 @@ bool MergeInfillLines::mergeInfillLines(double speed, unsigned int& path_idx)
         {
             extruder_plan.handleInserts(path_idx, gcode);
             GCodePath& last_path = paths[path_idx + 3];
-            writeCompensatedMove(last_middle, speed, last_path, line_width);
+            writeCompensatedMove(last_middle, last_path.config->getSpeed() * extruder_plan.getExtrudeSpeedFactor(), last_path, line_width);
         }
         path_idx = path_idx + 1; // means that the next path considered is the travel path after the converted extrusion path corresponding to the updated path_idx
         extruder_plan.handleInserts(path_idx, gcode);
@@ -61,18 +66,28 @@ bool MergeInfillLines::isConvertible(unsigned int path_idx_first_move, Point& fi
         return false;
     }
     if (   paths[idx+0].config != &travelConfig // must be travel
-        || paths[idx+1].points.size() > 1
+        || paths[idx+1].points.size() > 1       // extrusion path is single line
         || paths[idx+1].config == &travelConfig // must be extrusion
-//        || paths[idx+2].points.size() > 1
+//        || paths[idx+2].points.size() > 1       // travel must be direct
         || paths[idx+2].config != &travelConfig // must be travel
-        || paths[idx+3].points.size() > 1
+        || paths[idx+3].points.size() > 1       // extrusion path is single line
         || paths[idx+3].config == &travelConfig // must be extrusion
         || paths[idx+1].config != paths[idx+3].config // both extrusion moves should have the same config
     )
     {
         return false;
     }
-    
+
+    if (!(paths[idx+1].config->type == PrintFeatureType::Infill || paths[idx+1].config->type == PrintFeatureType::Skin))
+    { // only (skin) infill lines can be merged (note that the second extrusion line config is already checked to be the same as the first in code above)
+        return false;
+    }
+
+    if (paths[idx+1].space_fill_type != SpaceFillType::Lines || paths[idx+3].space_fill_type != SpaceFillType::Lines)
+    { // both extrusion moves must be of lines space filling type!
+        return false;
+    }
+
     int64_t line_width = paths[idx+1].config->getLineWidth();
     
     Point& a = paths[idx+0].points.back(); // first extruded line from
@@ -86,7 +101,6 @@ bool MergeInfillLines::isConvertible(unsigned int path_idx_first_move, Point& fi
 bool MergeInfillLines::isConvertible(const Point& a, const Point& b, const Point& c, const Point& d, int64_t line_width, Point& first_middle, Point& second_middle, int64_t& resulting_line_width, bool use_second_middle_as_first)
 {
     use_second_middle_as_first = false;
-    int64_t nozzle_size = line_width; // TODO
     int64_t max_line_width = nozzle_size * 3 / 2;
 
     Point ab = b - a;
@@ -108,7 +122,9 @@ bool MergeInfillLines::isConvertible(const Point& a, const Point& b, const Point
     // if the lines are in the same direction then abs( dot(ab,cd) / |ab| / |cd| ) == 1
     int64_t prod = dot(ab,cd);
     if (std::abs(prod) + 400 < ab_size * cd_size) // 400 = 20*20, where 20 micron is the allowed inaccuracy in the dot product, introduced by the inaccurate point locations of a,b,c,d
+    {
         return false; // extrusion moves not in the same or opposite diraction
+    }
     
     // make lines in the same direction by flipping one
     if (prod < 0)
@@ -129,21 +145,33 @@ bool MergeInfillLines::isConvertible(const Point& a, const Point& b, const Point
                     (a + b) / 2;
     second_middle = (c + d) / 2;
     
-    Point dir_vector_perp = crossZ(second_middle - first_middle);
+    Point dir_vector_perp = turn90CCW(second_middle - first_middle);
     int64_t dir_vector_perp_length = vSize(dir_vector_perp); // == dir_vector_length
-    if (dir_vector_perp_length == 0) return false;
-    if (dir_vector_perp_length > 5 * nozzle_size) return false; // infill lines too far apart
+    if (dir_vector_perp_length == 0)
+    {
+        return false;
+    }
+    if (dir_vector_perp_length > 5 * nozzle_size)
+    {
+        return false; // infill lines too far apart
+    }
 
     Point infill_vector = (cd + ab) / 2; // (similar to) average line / direction of the infill
 
     // compute the resulting line width
     resulting_line_width = std::abs( dot(dir_vector_perp, infill_vector) / dir_vector_perp_length );
-    if (resulting_line_width > max_line_width) return false; // combined lines would be too wide
-    if (resulting_line_width == 0) return false; // dot is zero, so lines are in each others extension, not next to eachother
+    if (resulting_line_width > max_line_width)
+    {
+        return false; // combined lines would be too wide
+    }
+    if (resulting_line_width == 0)
+    {
+        return false; // dot is zero, so lines are in each others extension, not next to eachother
+    }
 
     // check whether two lines are adjacent (note: not 'line segments' but 'lines')
     Point ac = c - first_middle;
-    Point infill_vector_perp = crossZ(infill_vector);
+    Point infill_vector_perp = turn90CCW(infill_vector);
     int64_t perp_proj = dot(ac, infill_vector_perp);
     int64_t infill_vector_perp_length = vSize(infill_vector_perp);
     if (std::abs(std::abs(perp_proj) / infill_vector_perp_length - line_width) > 20) // it should be the case that dot(ac, infill_vector_perp) / |infill_vector_perp| == line_width

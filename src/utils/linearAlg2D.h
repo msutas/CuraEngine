@@ -63,8 +63,34 @@ public:
         return -1;
                 
     }
-    
-    
+
+    /*!
+     * Find whether a point projected on a line segment would be projected to
+     * - properly on the line : zero returned
+     * - closer to \p a : -1 returned
+     * - closer to \p b : 1 returned
+     * 
+     * \param from The point to check in relation to the line segment
+     * \param a The start point of the line segment
+     * \param b The end point of the line segment
+     * \return the sign of the projection wrt the line segment
+     */
+    inline static short pointIsProjectedBeyondLine(const Point from, const Point a, const Point b)
+    {
+        const Point vec = b - a;
+        const Point point_vec = from - a;
+        const int64_t dot_prod = dot(point_vec, vec);
+        if (dot_prod < 0)
+        { // point is projected to before ab
+            return -1;
+        }
+        if (dot_prod > vSize2(vec))
+        { // point is projected to after ab
+            return 1;
+        }
+        return 0;
+    }
+
     /*!
     * Find the point closest to \p from on the line from \p p0 to \p p1
     */
@@ -190,6 +216,46 @@ public:
                 || getDist2FromLineSegment(c, a, d) <= max_dist2
                 || getDist2FromLineSegment(c, b, d) <= max_dist2;
     }
+    
+    /*!
+     * Compute the angle between two consecutive line segments.
+     * 
+     * The angle is computed from the left side of b when looking from a.
+     * 
+     *   c
+     *    \                     .
+     *     \ b
+     * angle|
+     *      |
+     *      a
+     * 
+     * \param a start of first line segment
+     * \param b end of first segment and start of second line segment
+     * \param c end of second line segment
+     * \return the angle in radians between 0 and 2 * pi of the corner in \p b
+     */
+    static float getAngleLeft(const Point& a, const Point& b, const Point& c);
+
+    /*!
+     * Check whether a corner is acute or obtuse.
+     * 
+     * This function is irrespective of the order between \p a and \p c;
+     * the lowest angle among bot hsides of the corner is always chosen.
+     * 
+     * isAcuteCorner(a, b, c) === isAcuteCorner(c, b, a)
+     * 
+     * \param a start of first line segment
+     * \param b end of first segment and start of second line segment
+     * \param c end of second line segment
+     * \return positive if acute, negative if obtuse, zero if 90 degree corner
+     */
+    static inline int isAcuteCorner(const Point a, const Point b, const Point c)
+    {
+        Point ba = a - b;
+        Point bc = c - b;
+        return dot(ba, bc);
+    }
+
 };
 
 

@@ -4,31 +4,19 @@
 namespace cura
 {
 
-/*
-enum class EPrintFeature : unsigned int // unused!!
-{ // TODO: use in gcodePathConfigs ?
-    OUTER_WALL,
-    INNER_WALLS,
-    INFILL,
-    SKIN,
-    HELPERS,
-    UNCLASSIFIED,
-    ENUM_COUNT
-};
-*/
-
-
-enum class PrintFeatureType
+enum class PrintFeatureType: unsigned char
 {
+    NoneType, // used to mark unspecified jumps in polygons. libArcus depends on it
     OuterWall,
     InnerWall,
     Skin,
     Support,
-    Skirt,
+    SkirtBrim,
     Infill,
     SupportInfill,
     MoveCombing,
-    MoveRetraction
+    MoveRetraction,
+    SupportInterface
 };
 
 
